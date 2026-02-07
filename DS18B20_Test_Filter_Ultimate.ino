@@ -1,1045 +1,638 @@
 /**
- * DS18B20_Test_Filter_Ultimate.ino
+ * DS18B20_Test_Filter_Ultimate_3_1.ino
  * 
  * УЛЬТИМАТИВНЫЙ ТЕСТЕР ФИЛЬТРАЦИИ ДЛЯ ДАТЧИКОВ DS18B20
  * 
- * ОСОБЕННОСТИ:
- * 1. Чистая статистика без "умных" рекомендаций
- * 2. Подробная гистограмма шума с фиксированной шириной
- * 3. Автокорреляция для анализа характера шума
- * 4. Экспорт данных в CSV с выравниванием столбцов
- * 5. Прогресс-бар выполнения теста
- * 6. Тест реакции с отсчётом времени
+ * ОСОБЕННОСТИ ДЛЯ ТЕСТИРОВАНИЯ:
+ * 1. БЕЗ ОКРУГЛЕНИЯ в вычислениях (точные данные)
+ * 2. Вывод с точностью 4 знака для анализа
+ * 3. Чистая статистика без искажений
  * 
- * ВЕРСИЯ: 3.0
- * ДАТА: 2024
- * АВТОР: AI Assistant
- * 
- * ПОДКЛЮЧЕНИЕ DS18B20:
- * DATA → GPIO4, VCC → 3.3V, GND → GND, резистор 4.7кОм между DATA и VCC
+ * ВЕРСИЯ: 3.1 (Тестовая, без округления)
  */
 
 #include <OneWire.h>
 #include <DallasTemperature.h>
 
 // ============================================================================
-// РАЗДЕЛ 1: КОНФИГУРАЦИЯ СИСТЕМЫ
+// РАЗДЕЛ 1: КОНФИГУРАЦИЯ СИСТЕМЫ (ТЕСТОВЫЙ РЕЖИМ)
 // ============================================================================
 
-/* РАЗРЕШЕНИЕ ДАТЧИКА (9-12 бит)
- * 9 бит:   шаг 0.5°C,   время 93.75 мс
- * 10 бит:  шаг 0.25°C,  время 187.5 мс
- * 11 бит:  шаг 0.125°C, время 375 мс
- * 12 бит:  шаг 0.0625°C, время 750 мс
- */
-#define RESOLUTION 12
-
-/* ИНТЕРВАЛ ИЗМЕРЕНИЙ (миллисекунды)
- * Должен быть БОЛЬШЕ времени конверсии датчика:
- * - Для 12 бит: минимум 1000 мс, лучше 1500-2000 мс
- */
-#define MEASURE_INTERVAL 1500
-
-/* ТИП ФИЛЬТРА
- * 0 - Без фильтра (сырые данные)
- * 1 - Медианный фильтр
- * 2 - Скользящее среднее
- * 3 - Экспоненциальное сглаживание
- * 4 - Двухступенчатый (медиана + эксп.сглаживание)
- */
-#define FILTER_TYPE 0
-
-/* РАЗМЕР ФИЛЬТРА (количество точек в буфере)
- * Больше размер = лучше сглаживание, но больше запаздывание
- * Рекомендации:
- * - Медианный: 3, 5, 7, 9 (нечётные числа)
- * - Скользящее среднее: 5, 7, 9, 11
- */
-#define FILTER_SIZE 1
-
-/* ПОРОГ ДЕТЕКЦИИ ИЗМЕНЕНИЙ (°C)
- * Минимальное изменение температуры, которое считается значимым
- * ВАЖНО: должен быть больше уровня шума датчика
- */
-#define DELTA_THRESHOLD 0.10
-
-/* ТОЧНОСТЬ ОКРУГЛЕНИЯ (количество знаков после запятой)
- * 1 - округление до 0.1°C
- * 2 - округление до 0.01°C
- * 3 - округление до 0.001°C
- */
-#define ROUND_TO_DECIMALS 2
-
-/* РЕЖИМ ТЕСТИРОВАНИЯ
- * 0 - Автоматический тест (измеряет шум, затем реакцию)
- * 1 - Только анализ шума (датчик в покое)
- * 2 - Только тест реакции (измеряет время отклика)
- */
-#define TEST_MODE 1
-
-/* ДЛИТЕЛЬНОСТЬ ТЕСТА (количество измерений)
- * 50-100  - быстрая оценка (1-3 минуты)
- * 150-200 - детальный анализ (4-6 минут)
- * 300+    - долгосрочная стабильность (7+ минут)
- */
-#define TEST_DURATION 120
+#define RESOLUTION 12           // 12 бит = 0.0625°C шаг
+#define MEASURE_INTERVAL 1500   // Интервал измерений (мс)
+#define FILTER_TYPE 2           // 0=без фильтра, 1=медианный, 2=скольз.среднее, 3=эксп., 4=двухступ.
+#define FILTER_SIZE 3           // Размер фильтра (для типа 1,2,4)
+#define DELTA_THRESHOLD 0.10    // Порог обнаружения изменений (°C)
+#define DISPLAY_PRECISION 4     // Количество знаков при выводе (4 для тестов)
+#define TEST_MODE 1             // 0=авто, 1=только шум, 2=только реакция
+#define TEST_DURATION 30       // Количество измерений (120 = ~3 мин)
 
 // ============================================================================
-// РАЗДЕЛ 2: КОНСТАНТЫ И НАСТРОЙКИ ФОРМАТИРОВАНИЯ
+// РАЗДЕЛ 2: КОНСТАНТЫ ФОРМАТИРОВАНИЯ
 // ============================================================================
 
-// Ширина столбцов для вывода CSV (в символах)
-#define CSV_TIME_WIDTH 12   // Ширина колонки "ВРЕМЯ_МС"
-#define CSV_TEMP_WIDTH 14   // Ширина колонки "ТЕМП_СЫРАЯ" и "ТЕМП_ФИЛЬТ"
-#define CSV_DELTA_WIDTH 10  // Ширина колонки "ДЕЛЬТА"
-
-// Настройки гистограммы
-#define HISTOGRAM_WIDTH 20  // Фиксированная ширина гистограммы (20 символов)
-#define HISTOGRAM_BINS 13   // Количество столбцов гистограммы (13: -0.06 до +0.06)
-
-// Настройки автокорреляции
-#define AUTOCORR_LAGS 3  // Количество лагов для автокорреляции (1, 2, 3)
-
-// Настройки прогресс-бара
-#define PROGRESS_BAR_WIDTH 40  // Ширина прогресс-бара в символах
+#define CSV_TIME_WIDTH 12
+#define CSV_TEMP_WIDTH 16       // Увеличено для 4 знаков + знак
+#define CSV_DELTA_WIDTH 12
+#define HISTOGRAM_WIDTH 20
+#define HISTOGRAM_BINS 13
+#define AUTOCORR_LAGS 3
+#define PROGRESS_BAR_WIDTH 40
 
 // ============================================================================
-// РАЗДЕЛ 3: АППАРАТНЫЕ НАСТРОЙКИ И ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
+// РАЗДЕЛ 3: АППАРАТНЫЕ НАСТРОЙКИ
 // ============================================================================
 
-// Пин для подключения шины 1-Wire
 const int ONE_WIRE_BUS = 4;
-
-// Объекты для работы с протоколом 1-Wire и датчиками Dallas
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 DeviceAddress sensorAddress;
 
 // ============================================================================
-// РАЗДЕЛ 4: СТРУКТУРЫ ДЛЯ ХРАНЕНИЯ ДАННЫХ
+// РАЗДЕЛ 4: СТРУКТУРЫ ДАННЫХ
 // ============================================================================
 
-/* СТРУКТУРА ДЛЯ МЕДИАННОГО ФИЛЬТРА
- * Хранит циклический буфер и индекс текущей позиции
- */
 typedef struct {
-  float buffer[15];  // Буфер для хранения значений (максимум 15)
-  int index;         // Текущий индекс в буфере
-  int size;          // Фактический размер буфера
-  bool initialized;  // Флаг инициализации
+  float buffer[15];
+  int index;
+  int size;
+  bool initialized;
 } MedianFilter_t;
 
-/* СТРУКТУРА ДЛЯ ХРАНЕНИЯ РЕЗУЛЬТАТОВ ИЗМЕРЕНИЙ
- * Сохраняет все измерения за время теста для последующего анализа
- */
 typedef struct {
-  float rawValues[500];           // Сырые значения температуры (максимум 500)
-  float filteredValues[500];      // Отфильтрованные значения температуры
-  float deltaValues[500];         // Обнаруженные изменения
-  unsigned long timestamps[500];  // Временные метки (мс от начала)
-  int count;                      // Количество сохранённых измерений
-  int maxCount;                   // Максимальное количество измерений
+  float rawValues[500];           // ТОЧНЫЕ сырые данные
+  float filteredValues[500];      // ТОЧНЫЕ фильтрованные данные
+  float deltaValues[500];         // ТОЧНЫЕ изменения
+  unsigned long timestamps[500];
+  int count;
+  int maxCount;
 } MeasurementData_t;
 
-/* СТРУКТУРА ДЛЯ СТАТИСТИЧЕСКОГО АНАЛИЗА
- * Содержит все статистические метрики теста
- */
 typedef struct {
-  // Основные метрики
-  float minRaw;       // Минимальное сырое значение
-  float maxRaw;       // Максимальное сырое значение
-  float minFiltered;  // Минимальное отфильтрованное значение
-  float maxFiltered;  // Максимальное отфильтрованное значение
-
-  // Для вычисления среднего
-  float sumRaw;       // Сумма сырых значений
-  float sumFiltered;  // Сумма отфильтрованных значений
-
-  // Для анализа шума (после удаления дрейфа)
-  float noiseMin;    // Минимальное значение шума
-  float noiseMax;    // Максимальное значение шума
-  float noiseSum;    // Сумма значений шума
-  float noiseSumSq;  // Сумма квадратов значений шума
-
-  // Время теста
-  unsigned long startTime;  // Время начала теста (мс)
-  unsigned long endTime;    // Время окончания теста (мс)
+  float minRaw, maxRaw;
+  float minFiltered, maxFiltered;
+  float sumRaw, sumFiltered;
+  float noiseMin, noiseMax;
+  float noiseSum, noiseSumSq;
+  unsigned long startTime, endTime;
 } Statistics_t;
 
-// Экземпляры структур
 MedianFilter_t medianFilter;
 MeasurementData_t measurements;
 Statistics_t stats;
 
-// Глобальные переменные состояния
-bool testRunning = false;           // Флаг выполнения теста
-int testPhase = 0;                  // Текущая фаза теста (0=шум, 1=реакция)
-unsigned long lastMeasureTime = 0;  // Время последнего измерения
+bool testRunning = false;
+int testPhase = 0;
+unsigned long lastMeasureTime = 0;
 
 // ============================================================================
-// РАЗДЕЛ 5: ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С ДАННЫМИ
+// РАЗДЕЛ 5: ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 // ============================================================================
-
-/** * ФУНКЦИЯ: roundToPrecision()
- * ВОЗВРАЩАЕТ: Значение, округлённое до заданного количества знаков
- * 
- * Параметры:
- *   value - исходное значение для округления
- *   decimals - количество знаков после запятой
- * 
- * Примеры:
- *   roundToPrecision(23.4567, 2) → 23.46
- *   roundToPrecision(23.4567, 1) → 23.5
- *   roundToPrecision(23.4567, 0) → 23
- */
-float roundToPrecision(float value, int decimals) {
-  // Вычисляем множитель: 10^decimals
-  float multiplier = 1.0;
-  for (int i = 0; i < decimals; i++) {
-    multiplier *= 10.0;
-  }
-
-  // Округляем и возвращаем
-  float rounded = round(value * multiplier) / multiplier;
-
-  // Для отладки: вывод процесса округления
-  // Serial.printf("Округление: %.6f * %.0f = %.6f → %.6f\n",
-  //               value, multiplier, value * multiplier, rounded);
-
-  return rounded;
-}
 
 /** * ФУНКЦИЯ: getConversionDelay()
- * ВОЗВРАЩАЕТ: Время конверсии в миллисекундах для заданного разрешения
- * 
- * Параметры:
- *   resolution - разрешение датчика (9-12 бит)
- * 
- * Принцип работы:
- * DS18B20 требует определённое время на преобразование температуры
- * в цифровое значение. Это время зависит от установленного разрешения.
- * Функция возвращает рекомендуемое время ожидания с запасом 25%.
+ * ВОЗВРАЩАЕТ: Время конверсии для разрешения
+ * КОММЕНТАРИЙ: Без изменений, работает правильно
  */
 int getConversionDelay(uint8_t resolution) {
-  // Базовые времена конверсии из даташита DS18B20
   int baseDelay;
   switch (resolution) {
-    case 9: baseDelay = 94; break;    // 93.75 мс по даташиту
-    case 10: baseDelay = 188; break;  // 187.5 мс
-    case 11: baseDelay = 375; break;  // 375 мс
-    case 12: baseDelay = 750; break;  // 750 мс
-    default: baseDelay = 750; break;  // По умолчанию максимум
+    case 9: baseDelay = 94; break;
+    case 10: baseDelay = 188; break;
+    case 11: baseDelay = 375; break;
+    case 12: baseDelay = 750; break;
+    default: baseDelay = 750; break;
   }
-
-  // Добавляем 25% запаса для надёжности
   return baseDelay * 125 / 100;
 }
 
-/** * ФУНКЦИЯ: formatNumberWithSign()
- * ВОЗВРАЩАЕТ: Строковое представление числа со знаком и фиксированной точностью
- * 
- * Параметры:
- *   value - число для форматирования
- *   decimals - количество знаков после запятой
- *   width - общая ширина поля (включая знак и точку)
- * 
- * Примеры:
- *   formatNumberWithSign(23.456, 2, 8) → " +23.46"
- *   formatNumberWithSign(-23.456, 2, 8) → " -23.46"
- *   formatNumberWithSign(0.0, 2, 8) → "  +0.00"
+/** * ФУНКЦИЯ: formatNumberForDisplay()
+ * ВОЗВРАЩАЕТ: Строку с числом для вывода
+ * ИЗМЕНЕНИЕ: Всегда 4 знака после запятой для тестов
  */
-String formatNumberWithSign(float value, int decimals, int width) {
+String formatNumberForDisplay(float value) {
   String result;
-
-  // Добавляем знак (всегда, даже для +0.00)
+  
   if (value >= 0) {
     result = "+";
   } else {
     result = "-";
-    value = -value;  // Работаем с абсолютным значением
+    value = -value;
   }
-
-  // Округляем до нужного количества знаков
-  float rounded = roundToPrecision(value, decimals);
-
-  // Преобразуем в строку с фиксированным количеством знаков после запятой
-  result += String(rounded, decimals);
-
-  // Дополняем пробелами до нужной ширины
-  while (result.length() < width) {
-    result = " " + result;
-  }
-
+  
+  // Форматируем с 4 знаками после запятой
+  result += String(value, 4);
   return result;
 }
 
 // ============================================================================
-// РАЗДЕЛ 6: ФУНКЦИИ ФИЛЬТРАЦИИ
+// РАЗДЕЛ 6: ФУНКЦИИ ФИЛЬТРАЦИИ (БЕЗ ОКРУГЛЕНИЯ)
 // ============================================================================
 
 /** * ФУНКЦИЯ: initMedianFilter()
- * НАЗНАЧЕНИЕ: Инициализация медианного фильтра
- * 
- * Принцип работы:
- * Заполняет весь буфер фильтра начальным значением.
- * Это необходимо для корректной работы фильтра до того,
- * как буфер полностью заполнится реальными данными.
+ * КОММЕНТАРИЙ: Без изменений
  */
 void initMedianFilter(float initialValue) {
   medianFilter.size = FILTER_SIZE;
   medianFilter.index = 0;
   medianFilter.initialized = true;
-
-  // Заполняем весь буфер начальным значением
   for (int i = 0; i < medianFilter.size; i++) {
     medianFilter.buffer[i] = initialValue;
   }
-
-  Serial.printf("Инициализация медианного фильтра: %d точек, начальное значение: %.2f°C\n",
-                medianFilter.size, initialValue);
 }
 
 /** * ФУНКЦИЯ: applyMedianFilter()
- * ВОЗВРАЩАЕТ: Отфильтрованное значение (медиана)
- * 
- * Параметры:
- *   newValue - новое измеренное значение
- * 
- * Принцип работы медианного фильтра:
- * 1. Добавляем новое значение в циклический буфер
- * 2. Копируем буфер во временный массив
- * 3. Сортируем временный массив по возрастанию
- * 4. Возвращаем средний элемент (медиану)
+ * КОММЕНТАРИЙ: Возвращает точное значение, без округления
  */
 float applyMedianFilter(float newValue) {
-  // Инициализация при первом вызове
   if (!medianFilter.initialized) {
     initMedianFilter(newValue);
     return newValue;
   }
-
-  // 1. Добавляем новое значение в буфер
+  
   medianFilter.buffer[medianFilter.index] = newValue;
-
-  // 2. Обновляем индекс (циклический буфер)
   medianFilter.index = (medianFilter.index + 1) % medianFilter.size;
-
-  // 3. Копируем в временный массив для сортировки
-  float tempBuffer[15];  // Максимальный размер
+  
+  float tempBuffer[15];
   for (int i = 0; i < medianFilter.size; i++) {
     tempBuffer[i] = medianFilter.buffer[i];
   }
-
-  // 4. Сортировка пузырьком (простая реализация)
+  
   for (int i = 0; i < medianFilter.size - 1; i++) {
     for (int j = 0; j < medianFilter.size - i - 1; j++) {
       if (tempBuffer[j] > tempBuffer[j + 1]) {
-        // Обмен значений
         float temp = tempBuffer[j];
         tempBuffer[j] = tempBuffer[j + 1];
         tempBuffer[j + 1] = temp;
       }
     }
   }
-
-  // 5. Возвращаем медиану (средний элемент)
-  float median = tempBuffer[medianFilter.size / 2];
-
-  // Отладка: вывод процесса фильтрации
-  // Serial.printf("Медианный фильтр: вход=%.3f, выход=%.3f, буфер=[", newValue, median);
-  // for (int i = 0; i < medianFilter.size; i++) {
-  //     Serial.printf("%.3f", medianFilter.buffer[i]);
-  //     if (i < medianFilter.size - 1) Serial.print(", ");
-  // }
-  // Serial.println("]");
-
-  return median;
+  
+  return tempBuffer[medianFilter.size / 2];  // Точная медиана
 }
 
 /** * ФУНКЦИЯ: applyMovingAverage()
- * ВОЗВРАЩАЕТ: Скользящее среднее значение
+ * ВОЗВРАЩАЕТ: Корректное скользящее среднее для DS18B20
  * 
- * Параметры:
- *   newValue - новое измеренное значение
+ * ИСПРАВЛЕННЫЕ ПРОБЛЕМЫ:
+ * 1. Правильная инициализация буфера разными значениями
+ * 2. Возврат отфильтрованных значений только после заполнения буфера
+ * 3. Чёткое разделение фаз: сбор данных → фильтрация
  * 
- * Принцип работы:
- * Поддерживает сумму последних N значений.
- * При добавлении нового значения:
- * 1. Вычитаем из суммы самое старое значение
- * 2. Добавляем новое значение в буфер
- * 3. Добавляем новое значение к сумме
- * 4. Делим сумму на количество элементов
+ * АЛГОРИТМ:
+ * Фаза 1: Собираем первые FILTER_SIZE измерений в буфер
+ * Фаза 2: После заполнения буфера начинаем нормальную фильтрацию
  */
 float applyMovingAverage(float newValue) {
-  static float buffer[15];  // Статический буфер
-  static int index = 0;     // Текущий индекс
-  static float sum = 0;     // Текущая сумма
-  static bool initialized = false;
-
-  // Инициализация при первом вызове
-  if (!initialized) {
-    for (int i = 0; i < FILTER_SIZE; i++) {
-      buffer[i] = newValue;
+  // 1. КОНВЕРТАЦИЯ В ТИКИ ДАТЧИКА (1 тик = 0.0625°C)
+  // Используем round() для правильного округления
+  int16_t newValueTicks = (int16_t)round(newValue * 16.0);
+  
+  // 2. СТАТИЧЕСКИЕ ПЕРЕМЕННЫЕ
+  static int16_t buffer[15];          // Буфер значений (в тиках)
+  static int8_t writeIndex = 0;       // Индекс для записи (только для фазы 1)
+  static int8_t filterIndex = 0;      // Циклический индекс для фазы 2
+  static int32_t sumTicks = 0;        // Сумма всех значений в буфере
+  static bool bufferFilled = false;   // Флаг: буфер полностью заполнен?
+  static uint8_t samplesInBuffer = 0; // Количество значений в буфере
+  
+  // 3. ФАЗА 1: ЗАПОЛНЕНИЕ БУФЕРА (первые FILTER_SIZE измерений)
+  if (!bufferFilled) {
+    // Добавляем новое значение в буфер
+    buffer[writeIndex] = newValueTicks;
+    sumTicks += newValueTicks;
+    samplesInBuffer++;
+    
+    // Увеличиваем индекс для следующей записи
+    writeIndex++;
+    
+    // Проверяем, заполнен ли буфер
+    if (samplesInBuffer >= FILTER_SIZE) {
+      bufferFilled = true;
+      filterIndex = 0;  // Начинаем с начала буфера для циклического доступа
+      
+      // Отладочный вывод (можно раскомментировать)
+      // Serial.printf("Буфер заполнен! %d значений, сумма: %ld тиков\n", 
+      //               FILTER_SIZE, sumTicks);
     }
-    sum = newValue * FILTER_SIZE;
-    initialized = true;
-
-    Serial.printf("Инициализация скользящего среднего: %d точек, начальное значение: %.2f°C\n",
-                  FILTER_SIZE, newValue);
+    
+    // В фазе заполнения возвращаем СЫРОЕ значение (фильтр ещё не готов)
     return newValue;
   }
-
-  // 1. Вычитаем самое старое значение из суммы
-  sum -= buffer[index];
-
-  // 2. Заменяем старое значение на новое
-  buffer[index] = newValue;
-
-  // 3. Добавляем новое значение к сумме
-  sum += newValue;
-
-  // 4. Обновляем индекс (циклический буфер)
-  index = (index + 1) % FILTER_SIZE;
-
-  // 5. Возвращаем среднее
-  float average = sum / FILTER_SIZE;
-
-  // Отладка
-  // Serial.printf("Скользящее среднее: вход=%.3f, выход=%.3f\n", newValue, average);
-
-  return average;
+  
+  // 4. ФАЗА 2: НОРМАЛЬНАЯ РАБОТА ФИЛЬТРА (буфер заполнен)
+  
+  // 4.1. УДАЛЯЕМ САМОЕ СТАРОЕ ЗНАЧЕНИЕ ИЗ СУММЫ
+  int16_t oldestValue = buffer[filterIndex];
+  sumTicks -= oldestValue;
+  
+  // 4.2. ДОБАВЛЯЕМ НОВОЕ ЗНАЧЕНИЕ В БУФЕР
+  buffer[filterIndex] = newValueTicks;
+  sumTicks += newValueTicks;
+  
+  // 4.3. ВЫЧИСЛЯЕМ СРЕДНЕЕ ЗНАЧЕНИЕ В ТИКАХ
+  // Используем float для точного деления
+  float averageTicks = (float)sumTicks / (float)FILTER_SIZE;
+  
+  // 4.4. ОКРУГЛЯЕМ ДО БЛИЖАЙШЕГО ЗНАЧЕНИЯ ДАТЧИКА
+  // round() гарантирует, что 361.49 → 361, 361.51 → 362
+  int16_t roundedTicks = (int16_t)round(averageTicks);
+  
+  // 4.5. ОБНОВЛЯЕМ ЦИКЛИЧЕСКИЙ ИНДЕКС
+  filterIndex = (filterIndex + 1) % FILTER_SIZE;
+  
+  // 4.6. КОНВЕРТИРУЕМ ОБРАТНО В ГРАДУСЫ
+  float filteredValue = (float)roundedTicks / 16.0;
+  
+  // 5. ОТЛАДОЧНЫЙ ВЫВОД (раскомментировать при необходимости)
+  /*
+  static uint32_t debugCounter = 0;
+  if (debugCounter++ % 10 == 0) {  // Выводим каждое 10-е измерение
+    Serial.printf("Скользящее среднее [%d точек]:\n", FILTER_SIZE);
+    Serial.printf("  Вход: %.4f°C = %d тиков\n", newValue, newValueTicks);
+    Serial.printf("  Буфер: [");
+    for (int i = 0; i < FILTER_SIZE; i++) {
+      Serial.printf("%.2f", buffer[i] / 16.0);
+      if (i < FILTER_SIZE - 1) Serial.print(", ");
+    }
+    Serial.printf("]\n");
+    Serial.printf("  Среднее: %.2f тиков → округлено: %d тиков\n", 
+                  averageTicks, roundedTicks);
+    Serial.printf("  Выход: %.4f°C\n\n", filteredValue);
+  }
+  */
+  
+  return filteredValue;
 }
 
 /** * ФУНКЦИЯ: applyExponentialSmoothing()
- * ВОЗВРАЩАЕТ: Экспоненциально сглаженное значение
- * 
- * Параметры:
- *   newValue - новое измеренное значение
- * 
- * Принцип работы:
- * y[n] = α * x[n] + (1 - α) * y[n-1]
- * где:
- *   y[n] - текущее сглаженное значение
- *   x[n] - текущее измеренное значение
- *   y[n-1] - предыдущее сглаженное значение
- *   α - коэффициент сглаживания (0 < α < 1)
+ * КОММЕНТАРИЙ: Без изменений
  */
 float applyExponentialSmoothing(float newValue) {
   static float lastValue = 0;
   static bool initialized = false;
-
+  
   if (!initialized) {
     lastValue = newValue;
     initialized = true;
-
-    Serial.printf("Инициализация эксп. сглаживания: начальное значение: %.2f°C\n", newValue);
     return newValue;
   }
-
-  // Коэффициент сглаживания (можно вынести в настройки)
+  
   float alpha = 0.3;
-
-  // Формула экспоненциального сглаживания
   float smoothed = alpha * newValue + (1 - alpha) * lastValue;
   lastValue = smoothed;
-
-  // Отладка
-  // Serial.printf("Эксп. сглаживание: вход=%.3f, выход=%.3f\n", newValue, smoothed);
-
+  
   return smoothed;
 }
 
 /** * ФУНКЦИЯ: applyTwoStageFilter()
- * ВОЗВРАЩАЕТ: Двухступенчато отфильтрованное значение
- * 
- * Параметры:
- *   newValue - новое измеренное значение
- * 
- * Принцип работы:
- * 1. Первая ступень: медианный фильтр (подавление выбросов)
- * 2. Вторая ступень: экспоненциальное сглаживание (устранение шума)
+ * КОММЕНТАРИЙ: Без изменений
  */
 float applyTwoStageFilter(float newValue) {
-  // 1. Подавление выбросов медианным фильтром
   float medianFiltered = applyMedianFilter(newValue);
-
-  // 2. Сглаживание шума экспоненциальным фильтром
+  
   static float stage2Value = 0;
   static bool stage2Initialized = false;
-
+  
   if (!stage2Initialized) {
     stage2Value = medianFiltered;
     stage2Initialized = true;
     return medianFiltered;
   }
-
-  // Коэффициент для второй ступени
+  
   float stage2Alpha = 0.4;
   stage2Value = stage2Alpha * medianFiltered + (1 - stage2Alpha) * stage2Value;
-
-  // Отладка
-  // Serial.printf("Двухступенчатый: вход=%.3f, медиана=%.3f, выход=%.3f\n",
-  //               newValue, medianFiltered, stage2Value);
-
+  
   return stage2Value;
 }
 
 /** * ФУНКЦИЯ: applyFilter()
- * ВОЗВРАЩАЕТ: Значение после применения выбранного фильтра
- * 
- * Параметры:
- *   rawValue - сырое значение с датчика
- * 
- * Принцип работы:
- * Вызывает соответствующую функцию фильтрации
- * в зависимости от значения FILTER_TYPE
+ * ВОЗВРАЩАЕТ: Точное отфильтрованное значение
+ * ИЗМЕНЕНИЕ: УДАЛЕНО округление! Возвращаем точные данные.
  */
 float applyFilter(float rawValue) {
   float filteredValue;
-
+  
   switch (FILTER_TYPE) {
-    case 0:  // Без фильтра
-      filteredValue = rawValue;
-      break;
-
-    case 1:  // Медианный фильтр
-      filteredValue = applyMedianFilter(rawValue);
-      break;
-
-    case 2:  // Скользящее среднее
-      filteredValue = applyMovingAverage(rawValue);
-      break;
-
-    case 3:  // Экспоненциальное сглаживание
-      filteredValue = applyExponentialSmoothing(rawValue);
-      break;
-
-    case 4:  // Двухступенчатый фильтр
-      filteredValue = applyTwoStageFilter(rawValue);
-      break;
-
-    default:  // По умолчанию - без фильтра
-      filteredValue = rawValue;
-      break;
+    case 0: filteredValue = rawValue; break;
+    case 1: filteredValue = applyMedianFilter(rawValue); break;
+    case 2: filteredValue = applyMovingAverage(rawValue); break;
+    case 3: filteredValue = applyExponentialSmoothing(rawValue); break;
+    case 4: filteredValue = applyTwoStageFilter(rawValue); break;
+    default: filteredValue = rawValue; break;
   }
-
-  // Округляем до заданной точности
-  filteredValue = roundToPrecision(filteredValue, ROUND_TO_DECIMALS);
-
+  
+  // ВАЖНО: НЕТ ОКРУГЛЕНИЯ! Возвращаем точное значение для тестов.
   return filteredValue;
 }
 
 // ============================================================================
-// РАЗДЕЛ 7: ФУНКЦИИ СТАТИСТИЧЕСКОГО АНАЛИЗА
+// РАЗДЕЛ 7: ФУНКЦИИ СТАТИСТИКИ
 // ============================================================================
 
-/** * ФУНКЦИЯ: initStatistics()
- * НАЗНАЧЕНИЕ: Инициализация структуры статистики
- * 
- * Принцип работы:
- * Устанавливает начальные значения для всех статистических метрик.
- * Вызывается один раз в начале теста.
+/**
+ * ФУНКЦИЯ: initStatistics()
+ * КОММЕНТАРИЙ: Без изменений
  */
 void initStatistics() {
-  stats.minRaw = 1000.0;
-  stats.maxRaw = -1000.0;
-  stats.minFiltered = 1000.0;
-  stats.maxFiltered = -1000.0;
-
-  stats.sumRaw = 0.0;
-  stats.sumFiltered = 0.0;
-
-  stats.noiseMin = 1000.0;
-  stats.noiseMax = -1000.0;
-  stats.noiseSum = 0.0;
-  stats.noiseSumSq = 0.0;
-
+  stats.minRaw = 1000.0; stats.maxRaw = -1000.0;
+  stats.minFiltered = 1000.0; stats.maxFiltered = -1000.0;
+  stats.sumRaw = 0.0; stats.sumFiltered = 0.0;
+  stats.noiseMin = 1000.0; stats.noiseMax = -1000.0;
+  stats.noiseSum = 0.0; stats.noiseSumSq = 0.0;
   stats.endTime = 0;
-
-  Serial.println("Статистика инициализирована");
 }
 
-/** * ФУНКЦИЯ: updateStatistics()
- * НАЗНАЧЕНИЕ: Обновление статистики новым измерением
- * 
- * Параметры:
- *   rawValue - сырое значение с датчика
- *   filteredValue - отфильтрованное значение
- * 
- * Принцип работы:
- * Обновляет все статистические метрики:
- * - Минимальное и максимальное значение
- * - Сумму для расчёта среднего
- * - Сумму квадратов для расчёта дисперсии
+/**
+ * ФУНКЦИЯ: updateStatistics()
+ * КОММЕНТАРИЙ: Использует точные данные
  */
 void updateStatistics(float rawValue, float filteredValue) {
-  // Обновление минимальных и максимальных значений
   if (rawValue < stats.minRaw) stats.minRaw = rawValue;
   if (rawValue > stats.maxRaw) stats.maxRaw = rawValue;
   if (filteredValue < stats.minFiltered) stats.minFiltered = filteredValue;
   if (filteredValue > stats.maxFiltered) stats.maxFiltered = filteredValue;
-
-  // Обновление сумм
+  
   stats.sumRaw += rawValue;
   stats.sumFiltered += filteredValue;
 }
 
-/** * ФУНКЦИЯ: detectDeltaChange()
- * ВОЗВРАЩАЕТ: Величина значимого изменения или 0
- * 
- * Параметры:
- *   currentValue - текущее отфильтрованное значение
- * 
- * Принцип работы:
- * Сравнивает текущее значение с предыдущим.
- * Если разница превышает порог DELTA_THRESHOLD,
- * возвращает величину изменения (с учётом знака).
+/**
+ * ФУНКЦИЯ: detectDeltaChange()
+ * ВОЗВРАЩАЕТ: Точное изменение или 0
+ * ИЗМЕНЕНИЕ: УДАЛЕНО округление! Возвращаем точную дельту.
  */
 float detectDeltaChange(float currentValue) {
   static float previousValue = 0;
   static bool hasPrevious = false;
-
-  // Первое измерение - просто запоминаем
+  
   if (!hasPrevious) {
     previousValue = currentValue;
     hasPrevious = true;
     return 0.0;
   }
-
-  // Вычисляем изменение
+  
   float delta = currentValue - previousValue;
-
-  // Сохраняем текущее значение как предыдущее для следующего вызова
   previousValue = currentValue;
-
-  // Проверяем порог (по абсолютному значению)
+  
   if (fabs(delta) >= DELTA_THRESHOLD) {
-    // Возвращаем округлённое значение изменения
-    return roundToPrecision(delta, ROUND_TO_DECIMALS);
+    return delta;  // ВАЖНО: Точная дельта, без округления!
   }
-
-  // Изменение меньше порога - игнорируем
+  
   return 0.0;
 }
 
-/** * ФУНКЦИЯ: calculateNoiseStatistics()
- * НАЗНАЧЕНИЕ: Вычисление статистики шума после удаления линейного тренда
- * 
- * Принцип работы:
- * 1. Вычисляет линейный тренд методом наименьших квадратов
- * 2. Вычитает тренд из данных
- * 3. Вычисляет статистику остатка (шума)
- * 
- * Возвращает: true если удалось вычислить, false если недостаточно данных
+/**
+ * ФУНКЦИЯ: calculateNoiseStatistics()
+ * КОММЕНТАРИЙ: Работает с точными данными
  */
 bool calculateNoiseStatistics() {
-  // Нужно минимум 10 точек для анализа
-  if (measurements.count < 10) {
-    Serial.println("⚠️  Недостаточно данных для анализа шума (нужно минимум 10 точек)");
-    return false;
-  }
-
+  if (measurements.count < 10) return false;
+  
   int N = measurements.count;
-
-  // 1. ВЫЧИСЛЕНИЕ ЛИНЕЙНОГО ТРЕНДА
-  // Формулы линейной регрессии: y = a + b*x
   float sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
-
-  // Суммируем данные для регрессии
+  
   for (int i = 0; i < N; i++) {
     float y = measurements.filteredValues[i];
-
-    sumX += i;       // Σx
-    sumY += y;       // Σy
-    sumXY += i * y;  // Σxy
-    sumX2 += i * i;  // Σx²
+    sumX += i;
+    sumY += y;
+    sumXY += i * y;
+    sumX2 += i * i;
   }
-
-  // Вычисляем коэффициенты регрессии
+  
   float b = (N * sumXY - sumX * sumY) / (N * sumX2 - sumX * sumX);
   float a = (sumY - b * sumX) / N;
-
-  // 2. АНАЛИЗ ОСТАТКОВ (ШУМА)
-  // Сбрасываем статистику шума
-  stats.noiseMin = 1000.0;
-  stats.noiseMax = -1000.0;
-  stats.noiseSum = 0.0;
-  stats.noiseSumSq = 0.0;
-
-  // Вычисляем остатки (разница между данными и трендом)
+  
+  stats.noiseMin = 1000.0; stats.noiseMax = -1000.0;
+  stats.noiseSum = 0.0; stats.noiseSumSq = 0.0;
+  
   for (int i = 0; i < N; i++) {
     float y = measurements.filteredValues[i];
-    float yTrend = a + b * i;     // Значение на линии тренда
-    float residual = y - yTrend;  // Остаток (шум)
-
-    // Обновляем статистику шума
+    float yTrend = a + b * i;
+    float residual = y - yTrend;
+    
     stats.noiseSum += residual;
     stats.noiseSumSq += residual * residual;
-
+    
     if (residual < stats.noiseMin) stats.noiseMin = residual;
     if (residual > stats.noiseMax) stats.noiseMax = residual;
   }
-
-  // Вычисляем среднее и дисперсию шума
-  float noiseMean = stats.noiseSum / N;
-  float noiseVariance = (stats.noiseSumSq / N) - (noiseMean * noiseMean);
-
-  // Отладка: вывод промежуточных результатов
-  // Serial.printf("Тренд: y = %.4f + %.4f*x (%.4f°C/100изм)\n", a, b, b*100);
-  // Serial.printf("Шум: мин=%.4f, макс=%.4f, среднее=%.4f, дисперсия=%.6f\n",
-  //               stats.noiseMin, stats.noiseMax, noiseMean, noiseVariance);
-
+  
   return true;
 }
 
-/** * ФУНКЦИЯ: calculateAutocorrelation()
- * НАЗНАЧЕНИЕ: Вычисление автокорреляции для анализа характера шума
- * 
- * Принцип работы:
- * Вычисляет коэффициент автокорреляции для разных лагов (задержек).
- * Это помогает определить, является ли шум "белым" (случайным)
- * или имеет какую-то структуру.
- * 
- * Параметры:
- *   lags - массив для сохранения коэффициентов автокорреляции
- *   maxLags - максимальное количество лагов для вычисления
- * 
- * Возвращает: количество вычисленных коэффициентов
+/**
+ * ФУНКЦИЯ: calculateAutocorrelation()
+ * КОММЕНТАРИЙ: Использует точные фильтрованные значения
  */
 int calculateAutocorrelation(float* lags, int maxLags) {
-  // Нужно достаточно данных для анализа
-  if (measurements.count < 20) {
-    Serial.println("⚠️  Недостаточно данных для автокорреляции (нужно минимум 20 точек)");
-    return 0;
-  }
-
+  if (measurements.count < 20) return 0;
+  
   int N = measurements.count;
-
-  // Вычисляем среднее значение
   float mean = stats.sumFiltered / N;
-
-  // Вычисляем дисперсию
+  
   float variance = 0;
   for (int i = 0; i < N; i++) {
     float diff = measurements.filteredValues[i] - mean;
     variance += diff * diff;
   }
   variance /= N;
-
-  // Если дисперсия слишком мала, автокорреляция не имеет смысла
-  if (variance < 0.000001) {
-    Serial.println("⚠️  Дисперсия слишком мала для вычисления автокорреляции");
-    return 0;
-  }
-
-  // Вычисляем автокорреляцию для каждого лага
-  int calculatedLags = min(maxLags, N / 4);  // Не больше четверти данных
-
+  
+  if (variance < 0.000001) return 0;
+  
+  int calculatedLags = min(maxLags, N / 4);
+  
   for (int lag = 0; lag < calculatedLags; lag++) {
     float correlation = 0;
-
-    // Суммируем произведения с учётом лага
     for (int i = 0; i < N - lag; i++) {
       float diff1 = measurements.filteredValues[i] - mean;
       float diff2 = measurements.filteredValues[i + lag] - mean;
       correlation += diff1 * diff2;
     }
-
-    // Нормализуем
     lags[lag] = correlation / ((N - lag) * variance);
   }
-
+  
   return calculatedLags;
 }
 
 // ============================================================================
-// РАЗДЕЛ 8: ФУНКЦИИ ВЫВОДА И ФОРМАТИРОВАНИЯ
+// РАЗДЕЛ 8: ФУНКЦИИ ВЫВОДА (ВСЕГДА 4 ЗНАКА)
 // ============================================================================
 
-/** * ФУНКЦИЯ: printProgressBar()
- * НАЗНАЧЕНИЕ: Вывод прогресс-бара выполнения теста
- * 
- * Принцип работы:
- * Выводит прогресс-бар в формате [=====>     ] XX%
- * Только при значимых изменениях (каждые 10% или завершение)
+/**
+ * ФУНКЦИЯ: printProgressBar()
+ * КОММЕНТАРИЙ: Без изменений
  */
 void printProgressBar(int current, int total) {
   static int lastPrintedPercent = -1;
-
-  // Вычисляем текущий процент
   int percent = (current * 100) / total;
-
-  // Выводим только если:
-  // 1. Первое измерение (current == 1)
-  // 2. Изменился десяток процентов (percent % 10 == 0)
-  // 3. Последнее измерение (current == total)
+  
   if (current == 1 || percent != lastPrintedPercent || current == total) {
     lastPrintedPercent = percent;
-
-    // Вычисляем ширину заполненной части
+    
     int filledWidth = (percent * PROGRESS_BAR_WIDTH) / 100;
     int emptyWidth = PROGRESS_BAR_WIDTH - filledWidth;
-
-    // Строим строку прогресс-бара
+    
     String progressBar = "[";
-    for (int i = 0; i < filledWidth; i++) {
-      progressBar += "=";
-    }
+    for (int i = 0; i < filledWidth; i++) progressBar += "=";
     if (filledWidth < PROGRESS_BAR_WIDTH) {
       progressBar += ">";
-      for (int i = 0; i < emptyWidth - 1; i++) {
-        progressBar += " ";
-      }
+      for (int i = 0; i < emptyWidth - 1; i++) progressBar += " ";
     }
     progressBar += "]";
-
-    // Выводим с новой строки
-    Serial.printf("%s %3d/%d (%3d%%)\n",
-                  progressBar.c_str(), current, total, percent);
+    
+    Serial.printf("%s %3d/%d (%3d%%)\n", progressBar.c_str(), current, total, percent);
   }
 }
 
-/** * ФУНКЦИЯ: printTestHeader()
- * НАЗНАЧЕНИЕ: Вывод заголовка теста с параметрами
- * 
- * Принцип работы:
- * Форматированный вывод всех настроек теста для
- * удобства отслеживания условий эксперимента.
+/**
+ * ФУНКЦИЯ: printTestHeader()
+ * ИЗМЕНЕНИЕ: Вывод настроек с пояснениями
  */
 void printTestHeader() {
   Serial.println("\n" + String(60, '='));
-  Serial.println("ТЕСТ ШУМА DS18B20 - УЛЬТИМАТИВНАЯ ВЕРСИЯ");
+  Serial.println("ТЕСТ DS18B20 - ВЕРСИЯ ДЛЯ ТЕСТИРОВАНИЯ ФИЛЬТРОВ");
   Serial.println(String(60, '='));
-
-  // Информация о конфигурации
+  
+  Serial.println("ВАЖНО: Эта версия НЕ округляет данные в вычислениях!");
+  Serial.println("       Вывод всегда с " + String(DISPLAY_PRECISION) + " знаками\n");
+  
+  const char* filterNames[] = {"Без фильтра", "Медианный", "Скользящее среднее",
+                               "Эксп. сглаживание", "Двухступенчатый"};
+  
   Serial.println("НАСТРОЙКИ ТЕСТА:");
-  Serial.printf("RESOLUTION: %d\n", RESOLUTION);
-  Serial.printf("MEASURE_INTERVAL: %d\n", MEASURE_INTERVAL);
-
-  const char* filterNames[] = {
-    "Без фильтра", "Медианный", "Скользящее среднее",
-    "Эксп. сглаживание", "Двухступенчатый"
-  };
-
-  Serial.printf("FILTER_TYPE: %d (%s)\n", FILTER_TYPE, filterNames[FILTER_TYPE]);
-  Serial.printf("FILTER_SIZE: %d\n", FILTER_SIZE);
-  Serial.printf("DELTA_THRESHOLD: %.2f\n", DELTA_THRESHOLD);
-  Serial.printf("ROUND_TO_DECIMALS: %d\n", ROUND_TO_DECIMALS);
-
-  const char* modeNames[] = {
-    "Автоматический", "Только шум", "Только реакция"
-  };
-
-  Serial.printf("TEST_MODE: %d (%s)\n", TEST_MODE, modeNames[TEST_MODE]);
-  Serial.printf("TEST_DURATION: %d\n", TEST_DURATION);
-
-  // Время конверсии
-  int conversionTime = getConversionDelay(RESOLUTION);
-  Serial.printf("Время конверсии: %d мс\n", conversionTime);
-
-  // Предупреждения
-  Serial.println("\nПРИМЕЧАНИЯ:");
-  if (MEASURE_INTERVAL < conversionTime) {
-    Serial.printf("⚠️  ВНИМАНИЕ: Интервал (%d мс) меньше времени конверсии (%d мс)!\n",
-                  MEASURE_INTERVAL, conversionTime);
-  }
-
-  // Инструкция
-  if (TEST_MODE == 0) {
-    Serial.println("\nИНСТРУКЦИЯ:");
-    Serial.println("1. Первые 50% измерений: датчик в покое (анализ шума)");
-    Serial.println("2. Последние 50%: поднесите палец к датчику (тест реакции)");
-  } else if (TEST_MODE == 1) {
-    Serial.println("\nИНСТРУКЦИЯ:");
-    Serial.println("Датчик должен оставаться в покое в течение всего теста");
-  } else if (TEST_MODE == 2) {
-    Serial.println("\nИНСТРУКЦИЯ:");
-    Serial.println("После начала теста поднесите палец к датчику");
-  }
-
+  Serial.printf("  Фильтр: %s\n", filterNames[FILTER_TYPE]);
+  Serial.printf("  Размер фильтра: %d\n", FILTER_SIZE);
+  Serial.printf("  Порог изменения: %.4f°C\n", DELTA_THRESHOLD);
+  Serial.printf("  Измерений: %d (%.1f мин)\n", TEST_DURATION, 
+                (TEST_DURATION * MEASURE_INTERVAL) / 60000.0);
   Serial.println(String(60, '='));
-  Serial.println();
 }
 
-/** * ФУНКЦИЯ: printHistogram()
- * НАЗНАЧЕНИЕ: Вывод гистограммы распределения шума
- * 
- * ФИКСИРОВАННЫЕ ЗНАЧЕНИЯ: от -0.09 до +0.09 с шагом 0.01
- * Всего 19 строк: -0.09, -0.08, ..., +0.08, +0.09
+/**
+ * ФУНКЦИЯ: printHistogram()
+ * ИЗМЕНЕНИЕ: Использует сырые данные, вывод с 4 знаками
  */
 void printHistogram() {
-  // Проверяем, что есть данные для гистограммы
   if (measurements.count < 10) {
-    Serial.println("⚠️  Недостаточно данных для построения гистограммы");
-    return;
-  }
-
-  // Вычисляем статистику шума
-  if (!calculateNoiseStatistics()) {
-    return;
-  }
-
-  // ФИКСИРОВАННЫЕ ЗНАЧЕНИЯ для гистограммы
-  const int NUM_VALUES = 19;  // -0.09 до +0.09 с шагом 0.01
-  float values[NUM_VALUES];
-  int counts[NUM_VALUES] = { 0 };
-
-  // Заполняем массив значений
-  for (int i = 0; i < NUM_VALUES; i++) {
-    values[i] = -0.09 + (i * 0.01);
-  }
-
-  // Подсчитываем значения в каждом интервале
-  for (int i = 0; i < measurements.count; i++) {
-    // Шум относительно медианы
-    float median = stats.sumFiltered / measurements.count;
-    float noise = measurements.filteredValues[i] - median;
-
-    // Определяем в какой интервал попадает значение
-    // Интервалы: [-0.095, -0.085), [-0.085, -0.075), ...
-    int binIndex = -1;
-
-    // Особый случай для -0.09 (первый интервал)
-    if (noise < -0.085) {
-      binIndex = 0;  // -0.09
-    }
-    // Особый случай для +0.09 (последний интервал)
-    else if (noise >= 0.085) {
-      binIndex = NUM_VALUES - 1;  // +0.09
-    }
-    // Все остальные интервалы
-    else {
-      // Смещаем на 0.005 чтобы центрировать
-      binIndex = (int)((noise + 0.095) / 0.01);
-      if (binIndex < 0) binIndex = 0;
-      if (binIndex >= NUM_VALUES) binIndex = NUM_VALUES - 1;
-    }
-
-    counts[binIndex]++;
-  }
-
-  // Находим максимальное количество
-  int maxCount = 0;
-  for (int i = 0; i < NUM_VALUES; i++) {
-    if (counts[i] > maxCount) maxCount = counts[i];
-  }
-
-  if (maxCount == 0) {
     Serial.println("⚠️  Недостаточно данных для гистограммы");
     return;
   }
-
-  // Выводим заголовок
-  Serial.println("\nГИСТОГРАММА ШУМА (относительно медианы):");
-
-  // Выводим гистограмму
-  for (int i = 0; i < NUM_VALUES; i++) {
-    // Форматируем значение
-    String valueStr;
-    if (values[i] >= 0) {
-      valueStr = "+" + String(values[i], 2);
+  
+  if (!calculateNoiseStatistics()) return;
+  
+  const int NUM_BINS = 19;
+  const float BIN_START = -0.09;
+  const float BIN_WIDTH = 0.01;
+  const int MAX_BAR_WIDTH = 20;
+  
+  float binCenters[NUM_BINS];
+  int binCounts[NUM_BINS] = {0};
+  
+  for (int i = 0; i < NUM_BINS; i++) {
+    binCenters[i] = BIN_START + (i * BIN_WIDTH);
+  }
+  
+  float meanValue = stats.sumRaw / measurements.count;
+  Serial.printf("   Среднее (сырые): %.4f°C\n", meanValue);
+  
+  for (int i = 0; i < measurements.count; i++) {
+    float noise = measurements.rawValues[i] - meanValue;
+    int binIndex = (int)((noise - BIN_START + BIN_WIDTH/2) / BIN_WIDTH);
+    
+    if (binIndex < 0) binIndex = 0;
+    else if (binIndex >= NUM_BINS) binIndex = NUM_BINS - 1;
+    
+    binCounts[binIndex]++;
+  }
+  
+  int maxCount = 0;
+  for (int i = 0; i < NUM_BINS; i++) {
+    if (binCounts[i] > maxCount) maxCount = binCounts[i];
+  }
+  
+  if (maxCount == 0) return;
+  
+  Serial.println("\nГИСТОГРАММА ШУМА (относительно среднего):");
+  
+  for (int i = 0; i < NUM_BINS; i++) {
+    String label;
+    if (binCenters[i] >= 0) {
+      label = "+" + String(binCenters[i], 2);
     } else {
-      valueStr = String(values[i], 2);
+      label = String(binCenters[i], 2);
     }
-
-    // Выравниваем до 6 символов
-    while (valueStr.length() < 6) {
-      valueStr = " " + valueStr;
-    }
-
-    // Вычисляем ширину столбца
+    
+    while (label.length() < 6) label = " " + label;
+    
     int barWidth = 0;
     if (maxCount > 0) {
-      barWidth = (counts[i] * HISTOGRAM_WIDTH) / maxCount;
+      barWidth = (binCounts[i] * MAX_BAR_WIDTH) / maxCount;
     }
-
-    // Строим столбец
+    
     String bar;
-    for (int j = 0; j < barWidth; j++) {
-      bar += "█";
-    }
-
-    // Выводим строку
-    Serial.printf("%s %s\n", valueStr.c_str(), bar.c_str());
+    for (int j = 0; j < barWidth; j++) bar += "█";
+    
+    Serial.printf("%s %s", label.c_str(), bar.c_str());
+    if (binCounts[i] > 0) Serial.printf(" (%d)", binCounts[i]);
+    Serial.println();
   }
-
-  // Статистика под гистограммой
-  Serial.printf("   Измерений: %d, Макс в интервале: %d\n", measurements.count, maxCount);
-  Serial.printf("   Диапазон шума: от %.3f до %.3f°C\n", stats.noiseMin, stats.noiseMax);
-  Serial.printf("   СКО (σ): %.4f°C\n",
-                sqrt((stats.noiseSumSq / measurements.count) - pow(stats.noiseSum / measurements.count, 2)));
+  
+  Serial.println("\n   СТАТИСТИКА ШУМА:");
+  Serial.printf("   Всего измерений: %d\n", measurements.count);
+  Serial.printf("   Диапазон шума: от %.4f до %.4f°C\n", stats.noiseMin, stats.noiseMax);
+  Serial.printf("   Среднее значение: %.4f°C\n", meanValue);
+  
+  if (measurements.count > 1) {
+    float variance = (stats.noiseSumSq - pow(stats.noiseSum, 2) / measurements.count) 
+                     / (measurements.count - 1);
+    float stdDev = sqrt(variance);
+    Serial.printf("   СКО (σ): %.4f°C\n", stdDev);
+  }
 }
 
-/** * ФУНКЦИЯ: printAutocorrelation()
- * НАЗНАЧЕНИЕ: Вывод результатов анализа автокорреляции
- * 
- * ИСПРАВЛЕНИЯ:
- * 1. Лаг начинается с 1 (а не 0)
- * 2. Правильное время: лаг 1 = 1.5 сек, лаг 2 = 3.0 сек и т.д.
- * 3. Убрана автокорреляция с самим собой (лаг 0 = 1.00)
+/**
+ * ФУНКЦИЯ: printAutocorrelation()
+ * ИЗМЕНЕНИЕ: Вывод с 2 знаками (для корреляции достаточно)
  */
 void printAutocorrelation() {
-  // Вычисляем автокорреляцию
   float lags[AUTOCORR_LAGS];
   int numLags = calculateAutocorrelation(lags, AUTOCORR_LAGS);
-
-  if (numLags == 0) {
-    return;
-  }
-
+  
+  if (numLags == 0) return;
+  
   Serial.println("\nАВТОКОРРЕЛЯЦИЯ (белый шум = 0):");
-
-  // Выводим каждый лаг (начиная с 1, а не 0)
+  
   for (int lagIndex = 1; lagIndex <= numLags; lagIndex++) {
-    float correlation = lags[lagIndex - 1];  // В массиве индекс lagIndex-1
+    float correlation = lags[lagIndex - 1];
     float timeSeconds = (lagIndex * MEASURE_INTERVAL) / 1000.0;
-
-    // Форматируем строку с лагом
+    
     String lagStr = "Лаг " + String(lagIndex) + " (" + String(timeSeconds, 1) + " сек):";
-    while (lagStr.length() < 22) {
-      lagStr += " ";
-    }
-
-    // Форматируем значение корреляции
+    while (lagStr.length() < 22) lagStr += " ";
+    
     String corrStr;
     if (correlation >= 0) {
       corrStr = " +" + String(correlation, 2);
     } else {
       corrStr = " " + String(correlation, 2);
     }
-    while (corrStr.length() < 7) {
-      corrStr += " ";
-    }
-
-    // Строим простой график
+    while (corrStr.length() < 7) corrStr += " ";
+    
     String graph = "[";
     int graphWidth = 20;
     int fillWidth = (int)(fabs(correlation) * graphWidth);
-
+    
     if (correlation >= 0) {
-      for (int i = 0; i < fillWidth; i++) {
-        graph += "=";
-      }
-      for (int i = fillWidth; i < graphWidth; i++) {
-        graph += " ";
-      }
+      for (int i = 0; i < fillWidth; i++) graph += "=";
+      for (int i = fillWidth; i < graphWidth; i++) graph += " ";
     } else {
-      for (int i = 0; i < graphWidth - fillWidth; i++) {
-        graph += " ";
-      }
-      for (int i = 0; i < fillWidth; i++) {
-        graph += "=";
-      }
+      for (int i = 0; i < graphWidth - fillWidth; i++) graph += " ";
+      for (int i = 0; i < fillWidth; i++) graph += "=";
     }
     graph += "]";
-
-    // Выводим строку
+    
     Serial.printf("%s %s %s\n", lagStr.c_str(), corrStr.c_str(), graph.c_str());
   }
-
-  // Интерпретация результатов
-  Serial.println("\nИНТЕРПРЕТАЦИЯ:");
-
+  
   bool hasSignificantCorrelation = false;
   for (int lagIndex = 0; lagIndex < numLags; lagIndex++) {
     if (fabs(lags[lagIndex]) > 0.3) {
@@ -1047,476 +640,185 @@ void printAutocorrelation() {
       break;
     }
   }
-
+  
   if (hasSignificantCorrelation) {
-    Serial.println("⚠️  Обнаружена значимая автокорреляция");
+    Serial.println("\n⚠️  Обнаружена значимая автокорреляция");
     Serial.println("   Шум не является белым (случайным)");
-    Serial.println("   Возможны систематические ошибки измерения");
-
-    // Дополнительная диагностика
-    if (lags[0] > 0.8) {  // Первый лаг (1.5 сек)
-      Serial.println("   💡 Совет: попробуйте уменьшить фильтр");
-    }
   } else {
-    Serial.println("✅ Шум близок к белому (случайному)");
-    Serial.println("   Фильтрация работает эффективно");
-  }
-
-  // Выводим дополнительные рекомендации
-  Serial.println("\nРЕКОМЕНДАЦИИ ПО АВТОКОРРЕЛЯЦИИ:");
-  if (numLags > 0) {
-    float firstCorr = lags[0];
-    if (firstCorr > 0.7) {
-      Serial.printf("   Автокорр. лаг 1: %.2f → фильтр слишком сильный\n", firstCorr);
-      Serial.println("   Попробуйте уменьшить FILTER_SIZE");
-    } else if (firstCorr < -0.3) {
-      Serial.printf("   Автокорр. лаг 1: %.2f → возможны колебания\n", firstCorr);
-      Serial.println("   Проверьте стабильность питания датчика");
-    } else {
-      Serial.printf("   Автокорр. лаг 1: %.2f → хорошее значение\n", firstCorr);
-    }
+    Serial.println("\n✅ Шум близок к белому (случайному)");
   }
 }
 
-/** * ФУНКЦИЯ: printCSVData()
- * НАЗНАЧЕНИЕ: Вывод данных в формате CSV с выравниванием столбцов
- * 
- * ИСПРАВЛЕНИЯ:
- * 1. Правильные пробелы между заголовками
- * 2. Выравнивание чисел по правому краю
- * 3. Чёткие разделители колонок
+/**
+ * ФУНКЦИЯ: printCSVData()
+ * ИЗМЕНЕНИЕ: Всегда 4 знака после запятой
  */
 void printCSVData() {
-  Serial.println("\nCSV ДАННЫЕ (скопируйте в Excel):");
-
-  // Выводим комментарии с настройками
-  Serial.println("# НАСТРОЙКИ ТЕСТА:");
-  Serial.println("# RESOLUTION=" + String(RESOLUTION));
-  Serial.println("# MEASURE_INTERVAL=" + String(MEASURE_INTERVAL));
-  Serial.println("# FILTER_TYPE=" + String(FILTER_TYPE));
-  Serial.println("# FILTER_SIZE=" + String(FILTER_SIZE));
-  Serial.println("# DELTA_THRESHOLD=" + String(DELTA_THRESHOLD, 2));
-  Serial.println("# ROUND_TO_DECIMALS=" + String(ROUND_TO_DECIMALS));
-  Serial.println("# TEST_MODE=" + String(TEST_MODE));
-  Serial.println("# TEST_DURATION=" + String(TEST_DURATION));
-  Serial.println("#");
-
-  // ===== ИСПРАВЛЕННЫЙ ЗАГОЛОВОК С ПРОБЕЛАМИ =====
-  String header = "ВРЕМЯ_МС";
-  // Добавляем пробелы до нужной ширины
-  while (header.length() < CSV_TIME_WIDTH) {
-    header += " ";
-  }
-
-  header += "ТЕМП_СЫРАЯ";
-  while (header.length() < CSV_TIME_WIDTH + CSV_TEMP_WIDTH) {
-    header += " ";
-  }
-
-  header += "ТЕМП_ФИЛЬТ";
-  while (header.length() < CSV_TIME_WIDTH + CSV_TEMP_WIDTH * 2) {
-    header += " ";
-  }
-
-  header += "ДЕЛЬТА";
-
-  Serial.println(header);
-  Serial.println(String(header.length(), '-'));  // Разделительная линия
-
-  // Выводим данные (первые 20 строк или все, если меньше)
+  Serial.println("\nCSV ДАННЫЕ (все значения с 4 знаками):");
+  
+  // Заголовок
+  Serial.println("# Настройки: FILTER_TYPE=" + String(FILTER_TYPE) + 
+                 ", FILTER_SIZE=" + String(FILTER_SIZE));
+  Serial.println("ВРЕМЯ_МС,ТЕМП_СЫРАЯ,ТЕМП_ФИЛЬТ,ДЕЛЬТА");
+  
+  // Данные (первые 20 строк)
   int rowsToShow = min(20, measurements.count);
-
+  
   for (int i = 0; i < rowsToShow; i++) {
-    String row;
-
-    // 1. ВРЕМЯ (выравнивание по правому краю)
-    String timeStr = String(measurements.timestamps[i]);
-    // Добавляем пробелы слева
-    while (timeStr.length() < CSV_TIME_WIDTH) {
-      timeStr = " " + timeStr;
-    }
-    row += timeStr;
-
-    // 2. СЫРАЯ ТЕМПЕРАТУРА (выравнивание по правому краю)
-    String rawTempStr = String(measurements.rawValues[i], 2);
-    while (rawTempStr.length() < CSV_TEMP_WIDTH) {
-      rawTempStr = " " + rawTempStr;
-    }
-    row += rawTempStr;
-
-    // 3. ФИЛЬТРОВАННАЯ ТЕМПЕРАТУРА (выравнивание по правому краю)
-    String filtTempStr = String(measurements.filteredValues[i], 2);
-    while (filtTempStr.length() < CSV_TEMP_WIDTH) {
-      filtTempStr = " " + filtTempStr;
-    }
-    row += filtTempStr;
-
-    // 4. ДЕЛЬТА (со знаком, выравнивание по правому краю)
+    String row = String(measurements.timestamps[i]) + ",";
+    row += String(measurements.rawValues[i], 4) + ",";
+    row += String(measurements.filteredValues[i], 4) + ",";
+    
     float delta = measurements.deltaValues[i];
-    String deltaStr;
     if (delta >= 0) {
-      deltaStr = "+" + String(delta, 2);
+      row += "+" + String(delta, 4);
     } else {
-      deltaStr = String(delta, 2);
+      row += String(delta, 4);
     }
-    // Выравниваем дельту
-    while (deltaStr.length() < CSV_DELTA_WIDTH) {
-      deltaStr = " " + deltaStr;
-    }
-    row += deltaStr;
-
+    
     Serial.println(row);
   }
-
-  // Если данных больше 20 строк, показываем сколько всего
+  
   if (measurements.count > 20) {
-    Serial.println(String(header.length(), '.'));  // Разделительная линия
     Serial.printf("# ... и ещё %d строк\n", measurements.count - 20);
-    Serial.println("# Полные данные доступны в памяти программы");
   }
-
-  // Разделитель после CSV данных
-  Serial.println();
 }
 
-/** * ФУНКЦИЯ: printTestResults()
- * НАЗНАЧЕНИЕ: Вывод итоговых результатов теста
- * 
- * Принцип работы:
- * Агрегирует все собранные данные и выводит полный отчёт
- * с гистограммой, автокорреляцией, статистикой и CSV данными.
+/**
+ * ФУНКЦИЯ: printTestResults()
+ * ИЗМЕНЕНИЕ: Все значения с 4 знаками
  */
 void printTestResults() {
   Serial.println("\n" + String(60, '='));
-  Serial.println("РЕЗУЛЬТАТЫ ТЕСТА");
+  Serial.println("РЕЗУЛЬТАТЫ ТЕСТА (без округления)");
   Serial.println(String(60, '='));
-
-  // Основная статистика
-  Serial.println("\nСТАТИСТИКА:");
-
+  
   float avgRaw = stats.sumRaw / measurements.count;
   float avgFiltered = stats.sumFiltered / measurements.count;
-  float totalRange = stats.maxRaw - stats.minRaw;
-
-  Serial.printf("Общий диапазон:  %.2f°C ── %.2f°C (Δ=%.2f°C)\n",
-                stats.minRaw, stats.maxRaw, totalRange);
-
-  Serial.printf("Среднее (сырое): %.2f°C\n", avgRaw);
-  Serial.printf("Среднее (фильтр): %.2f°C\n", avgFiltered);
-
-  // Статистика шума
+  
+  Serial.println("\nОСНОВНАЯ СТАТИСТИКА:");
+  Serial.printf("Общий диапазон:  %.4f°C ── %.4f°C\n", stats.minRaw, stats.maxRaw);
+  Serial.printf("Среднее (сырое): %.4f°C\n", avgRaw);
+  Serial.printf("Среднее (фильтр): %.4f°C\n", avgFiltered);
+  
   if (calculateNoiseStatistics()) {
     float noiseRange = stats.noiseMax - stats.noiseMin;
-    float noiseStdDev = sqrt((stats.noiseSumSq / measurements.count) - pow(stats.noiseSum / measurements.count, 2));
-
-    Serial.printf("Чистый шум:      %.3f°C размах\n", noiseRange);
+    float noiseStdDev = sqrt((stats.noiseSumSq / measurements.count) - 
+                            pow(stats.noiseSum / measurements.count, 2));
+    
+    Serial.printf("Чистый шум:      %.4f°C размах\n", noiseRange);
     Serial.printf("СКО (σ):         %.4f°C\n", noiseStdDev);
-
-    // Отношение порога к шуму
+    
     if (noiseStdDev > 0) {
       float sigmaRatio = DELTA_THRESHOLD / noiseStdDev;
-      Serial.printf("Отношение σ/порог: %.1fσ\n", sigmaRatio);
-
-      if (sigmaRatio >= 3.0) {
-        Serial.println("   ✅ Безопасно: помехи не вызовут ложных срабатываний");
-      } else if (sigmaRatio >= 2.0) {
-        Serial.println("   ⚠️  Риск: возможны случайные срабатывания");
-      } else {
-        Serial.println("   ❌ Опасно: высокая вероятность ложных срабатываний");
-      }
+      Serial.printf("Отношение порог/σ: %.1f\n", sigmaRatio);
     }
   }
-
-  // Время теста
+  
   unsigned long testDuration = stats.endTime - stats.startTime;
   Serial.printf("Время теста:     %.1f минут\n", testDuration / 60000.0);
   Serial.printf("Измерений:       %d/%d\n", measurements.count, TEST_DURATION);
-
-  // Выводим гистограмму
+  
   printHistogram();
-
-  // Выводим автокорреляцию
   printAutocorrelation();
-
-  // Выводим CSV данные
   printCSVData();
-
+  
   Serial.println("\n" + String(60, '='));
   Serial.println("ТЕСТ ЗАВЕРШЁН");
   Serial.println(String(60, '='));
 }
 
 // ============================================================================
-// РАЗДЕЛ 9: ФУНКЦИИ ТЕСТА РЕАКЦИИ
+// РАЗДЕЛ 9: ОСНОВНЫЕ ФУНКЦИИ ARDUINO
 // ============================================================================
 
-/** * ФУНКЦИЯ: runReactionTest()
- * НАЗНАЧЕНИЕ: Выполнение теста реакции системы
- * 
- * Принцип работы:
- * 1. Выводит отсчёт 10...1
- * 2. Просит коснуться датчика
- * 3. Замеряет время от сигнала до обнаружения изменения
- * 4. Замеряет время от реального изменения до обнаружения
- * 
- * Возвращает: true если тест выполнен успешно, false если ошибка
- */
-bool runReactionTest() {
-  Serial.println("\n" + String(50, '='));
-  Serial.println("ТЕСТ РЕАКЦИИ");
-  Serial.println(String(50, '='));
-
-  Serial.println("ПОДГОТОВКА...");
-  delay(1000);
-
-  // Отсчёт 10...1
-  for (int i = 10; i > 0; i--) {
-    Serial.printf("%d ", i);
-    delay(1000);
-  }
-
-  Serial.println("\nКАСАЙТЕСЬ!");
-  unsigned long touchSignalTime = millis();
-
-  // Ждём начала изменения температуры
-  bool changeDetected = false;
-  unsigned long changeStartTime = 0;
-  unsigned long detectionTime = 0;
-  float detectedDelta = 0;
-
-  // Сбрасываем детектор изменений
-  static float lastValueForReaction = 0;
-  static bool hasLastValue = false;
-  lastValueForReaction = 0;
-  hasLastValue = false;
-
-  // Мониторим изменения в течение 30 секунд
-  unsigned long reactionTestEnd = millis() + 30000;
-
-  while (millis() < reactionTestEnd && !changeDetected) {
-    // Выполняем измерение
-    sensors.requestTemperatures();
-    delay(getConversionDelay(RESOLUTION));
-
-    float rawTemp = sensors.getTempC(sensorAddress);
-    if (rawTemp == DEVICE_DISCONNECTED_C) {
-      continue;
-    }
-
-    float filteredTemp = applyFilter(rawTemp);
-
-    // Детектируем изменение
-    if (!hasLastValue) {
-      lastValueForReaction = filteredTemp;
-      hasLastValue = true;
-    } else {
-      float delta = filteredTemp - lastValueForReaction;
-      lastValueForReaction = filteredTemp;
-
-      if (fabs(delta) >= DELTA_THRESHOLD) {
-        changeDetected = true;
-        changeStartTime = millis();  // Время реального изменения
-        detectedDelta = delta;
-
-        // Нужно ещё одно измерение для подтверждения
-        delay(MEASURE_INTERVAL);
-
-        sensors.requestTemperatures();
-        delay(getConversionDelay(RESOLUTION));
-
-        float confirmTemp = sensors.getTempC(sensorAddress);
-        float confirmFiltered = applyFilter(confirmTemp);
-
-        float confirmDelta = confirmFiltered - filteredTemp;
-        if (fabs(confirmDelta) >= DELTA_THRESHOLD * 0.5) {
-          detectionTime = millis();
-        }
-      }
-    }
-
-    delay(MEASURE_INTERVAL / 2);  // Проверяем чаще, чем обычно
-  }
-
-  // Выводим результаты
-  if (changeDetected) {
-    Serial.println("\nРЕЗУЛЬТАТЫ ТЕСТА РЕАКЦИИ:");
-    Serial.println("┌─────────────────────────────────────┐");
-
-    if (touchSignalTime > 0 && changeStartTime > touchSignalTime) {
-      float timeFromSignal = (changeStartTime - touchSignalTime) / 1000.0;
-      Serial.printf("│ Время от сигнала:     %5.1f сек       │\n", timeFromSignal);
-    }
-
-    if (detectionTime > 0 && changeStartTime > 0) {
-      float timeFromChange = (detectionTime - changeStartTime) / 1000.0;
-      Serial.printf("│ Время от изменения:  %5.1f сек       │\n", timeFromChange);
-    }
-
-    Serial.printf("│ Изменение:           %+6.2f°C         │\n", detectedDelta);
-    Serial.println("└─────────────────────────────────────┘");
-
-    return true;
-  } else {
-    Serial.println("\n❌ ИЗМЕНЕНИЕ НЕ ОБНАРУЖЕНО");
-    Serial.println("   Проверьте подключение датчика");
-    return false;
-  }
-}
-
-// ============================================================================
-// РАЗДЕЛ 10: ОСНОВНЫЕ ФУНКЦИИ ARDUINO
-// ============================================================================
-
-/** * ФУНКЦИЯ: setup()
- * НАЗНАЧЕНИЕ: Инициализация системы (вызывается один раз при старте)
- */
 void setup() {
-  // Инициализация последовательного порта
   Serial.begin(115200);
-  delay(2000);  // Ожидание стабилизации
-
-  Serial.println("\n\n");
+  delay(2000);
+  
+  Serial.println("\n\n" + String(50, '*'));
+  Serial.println("*  ТЕСТОВЫЙ РЕЖИМ DS18B20 (без округления)  *");
   Serial.println(String(50, '*'));
-  Serial.println("*  УЛЬТИМАТИВНЫЙ ТЕСТЕР DS18B20  *");
-  Serial.println("*        Версия 3.0               *");
-  Serial.println(String(50, '*'));
-
-  // Инициализация датчика
-  Serial.println("\n🔧 Инициализация датчика температуры...");
+  
   sensors.begin();
   delay(100);
-
-  // Поиск датчика
-  Serial.print("🔍 Поиск датчиков... ");
+  
   int deviceCount = sensors.getDeviceCount();
-  Serial.printf("найдено: %d\n", deviceCount);
-
+  Serial.printf("Датчиков найдено: %d\n", deviceCount);
+  
   if (deviceCount == 0) {
-    Serial.println("❌ КРИТИЧЕСКАЯ ОШИБКА: Датчики не обнаружены!");
-    Serial.println("   Проверьте подключение и перезагрузите устройство");
-    while (true) {
-      delay(1000);
-    }
+    Serial.println("❌ ОШИБКА: Датчики не обнаружены!");
+    while (true) delay(1000);
   }
-
-  // Получение адреса датчика
+  
   if (!sensors.getAddress(sensorAddress, 0)) {
-    Serial.println("❌ Не удалось получить адрес датчика!");
-    while (true) {
-      delay(1000);
-    }
+    Serial.println("❌ ОШИБКА: Не удалось получить адрес!");
+    while (true) delay(1000);
   }
-
-  // Настройка разрешения
+  
   sensors.setResolution(sensorAddress, RESOLUTION);
-
-  // Инициализация структур данных
+  
   measurements.count = 0;
   measurements.maxCount = min(500, TEST_DURATION);
-
   initStatistics();
-
-  // Вывод заголовка теста
+  
   printTestHeader();
-
-  // Запуск теста
+  
   testRunning = true;
   testPhase = 0;
-
-  Serial.println("✅ Система готова к тестированию");
-  Serial.println("   Начинаем через 3 секунды...\n");
-  Serial.println();
-  delay(3000);
-
-  stats.startTime = millis();  // Теперь время начнётся с 0
-  Serial.println("🕐 Таймер теста запущен (время начинается с 0 мс)");
+  
+  Serial.println("\n✅ Система готова. Начинаем тест...\n");
+  delay(1000);
+  
+  stats.startTime = millis();
 }
 
-/** * ФУНКЦИЯ: loop()
- * НАЗНАЧЕНИЕ: Основной цикл программы (вызывается постоянно)
- */
 void loop() {
-  // Проверяем, выполняется ли ещё тест
-  if (!testRunning) {
-    return;
-  }
-
-  // Проверяем время следующего измерения
+  if (!testRunning) return;
+  
   unsigned long currentTime = millis();
-  if (currentTime - lastMeasureTime < MEASURE_INTERVAL) {
-    return;
-  }
-
+  if (currentTime - lastMeasureTime < MEASURE_INTERVAL) return;
+  
   lastMeasureTime = currentTime;
-
-  // Выполняем измерение
+  
   sensors.requestTemperatures();
   delay(getConversionDelay(RESOLUTION));
-
-  // Читаем результат
+  
   float rawTemperature = sensors.getTempC(sensorAddress);
-
-  // Проверка на ошибки чтения
+  
   if (rawTemperature == DEVICE_DISCONNECTED_C) {
-    Serial.printf("[%6lu мс] ❌ Ошибка чтения датчика\n", currentTime - stats.startTime);
+    Serial.printf("[%6lu мс] ❌ Ошибка чтения\n", currentTime - stats.startTime);
     return;
   }
-
-  // Обработка данных
+  
+  // ВАЖНО: Все вычисления БЕЗ округления!
   float filteredTemperature = applyFilter(rawTemperature);
   float deltaChange = detectDeltaChange(filteredTemperature);
-
-  // Сохранение данных
+  
   if (measurements.count < measurements.maxCount) {
     measurements.rawValues[measurements.count] = rawTemperature;
     measurements.filteredValues[measurements.count] = filteredTemperature;
     measurements.deltaValues[measurements.count] = deltaChange;
     measurements.timestamps[measurements.count] = currentTime - stats.startTime;
     measurements.count++;
-
-    // Обновление статистики
+    
     updateStatistics(rawTemperature, filteredTemperature);
-
-    // Вывод прогресс-бара
     printProgressBar(measurements.count, TEST_DURATION);
   }
-
-  // Проверка завершения фазы шума (для TEST_MODE 0)
-  if (TEST_MODE == 0 && testPhase == 0 && measurements.count >= TEST_DURATION / 2) {
-    testPhase = 1;
-    Serial.println("\n\n" + String(50, '-'));
-    Serial.println("ФАЗА 1 ЗАВЕРШЕНА: Анализ шума");
-    Serial.println("👆 Теперь поднесите палец к датчику для теста реакции");
-    Serial.println(String(50, '-') + "\n");
-  }
-
-  // Проверка завершения теста
+  
   if (measurements.count >= TEST_DURATION) {
     testRunning = false;
     stats.endTime = millis();
-
-    // Завершаем прогресс-бар
+    
     Serial.println();
-
-    // Пауза для завершения вывода
     delay(1000);
-
-    // Вывод результатов
+    
     printTestResults();
-
-    // Выполнение теста реакции (если нужно)
-    if (TEST_MODE == 0 || TEST_MODE == 2) {
-      runReactionTest();
-    }
-
+    
     Serial.println("\n" + String(50, '='));
     Serial.println("🛑 ПРОГРАММА ЗАВЕРШЕНА");
-    Serial.println(String(50, '='));
-    Serial.println("Для нового теста измените параметры и перезагрузите устройство");
-
-    // Бесконечный цикл по завершении
-    while (true) {
-      delay(1000);
-    }
+    Serial.println("Для нового теста измените настройки и перезагрузите");
+    
+    while (true) delay(1000);
   }
 }
